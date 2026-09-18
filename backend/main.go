@@ -15,6 +15,9 @@ import (
 	"github.com/Ashutosh-negi07/live-poll/middleware"
 	"github.com/gin-contrib/cors"
 	"github.com/gin-gonic/gin"
+	"go.mongodb.org/mongo-driver/v2/bson"
+	"go.mongodb.org/mongo-driver/v2/mongo"
+	"go.mongodb.org/mongo-driver/v2/mongo/options"
 )
 
 func main() {
@@ -36,10 +39,16 @@ func main() {
 	}
 	defer db.CloseRedis()
 
-	// ── 5. Create the Gin router ─────────────────────────────────────────────
+	// ── 5. Ensure MongoDB indexes ─────────────────────────────────────────────
+	// Indexes are created idempotently — safe to run on every startup.
+	// The unique index on users.email is the authoritative guard against
+	// duplicate accounts (application-level check is a fast-fail, not sufficient).
+	ensureIndexes()
+
+	// ── 6. Create the Gin router ──────────────────────────────────────────────
 	router := gin.Default()
 
-	// ── 6. Apply CORS middleware ─────────────────────────────────────────────
+	// ── 7. Apply CORS middleware ──────────────────────────────────────────────
 	// This allows our React frontend on port 5173 to call our Go API on 8080.
 	router.Use(cors.New(cors.Config{
 		AllowOrigins:     []string{cfg.ClientOrigin},
@@ -49,7 +58,7 @@ func main() {
 		MaxAge:           12 * time.Hour,
 	}))
 
-	// ── 7. Health check endpoint ─────────────────────────────────────────────
+	// ── 8. Health check endpoint ──────────────────────────────────────────────
 	router.GET("/api/health", func(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{
 			"status":  "ok",
@@ -57,14 +66,14 @@ func main() {
 		})
 	})
 
-	// ── 8. Public routes (no JWT required) ──────────────────────────────────
+	// ── 9. Public routes (no JWT required) ───────────────────────────────────
 	router.POST("/api/auth/register", handlers.Register(cfg))
 	router.POST("/api/auth/login", handlers.Login(cfg))
-	router.GET("/api/polls/:id", handlers.GetPoll)              // audience view — public
-	router.POST("/api/polls/:id/vote", handlers.Vote)           // cast a vote — public
-	router.GET("/api/polls/:id/stream", handlers.Stream)        // SSE live stream — public
+	router.GET("/api/polls/:id", handlers.GetPoll)       // audience view — public
+	router.POST("/api/polls/:id/vote", handlers.Vote)    // cast a vote — public
+	router.GET("/api/polls/:id/stream", handlers.Stream) // SSE live stream — public
 
-	// ── 9. Protected routes (JWT required) ───────────────────────────────────
+	// ── 10. Protected routes (JWT required) ──────────────────────────────────
 	protected := router.Group("/api")
 	protected.Use(middleware.AuthMiddleware(cfg))
 	{
@@ -74,7 +83,7 @@ func main() {
 		protected.PATCH("/polls/:id/close", handlers.ClosePoll)
 	}
 
-	// ── 10. Configure the HTTP server ────────────────────────────────────────
+	// ── 11. Configure the HTTP server ────────────────────────────────────────
 	server := &http.Server{
 		Addr:         ":" + cfg.Port,
 		Handler:      router,
@@ -83,7 +92,7 @@ func main() {
 		IdleTimeout:  60 * time.Second,
 	}
 
-	// ── 9. Start server in a background goroutine ────────────────────────────
+	// ── 12. Start server in a background goroutine ────────────────────────────
 	// ListenAndServe blocks forever, so we run it in a goroutine so the main
 	// goroutine can continue to the shutdown signal listener below.
 	go func() {
@@ -93,7 +102,7 @@ func main() {
 		}
 	}()
 
-	// ── 10. Graceful shutdown ────────────────────────────────────────────────
+	// ── 13. Graceful shutdown ─────────────────────────────────────────────────
 	// Block here until the OS sends SIGINT (Ctrl+C) or SIGTERM (docker stop).
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
@@ -109,4 +118,46 @@ func main() {
 		log.Fatalf("Forced shutdown: %v\n", err)
 	}
 	log.Println("Server exited cleanly.")
+}
+
+// ensureIndexes creates all required MongoDB indexes at startup.
+// MongoDB's CreateIndex is idempotent — calling it on an existing index is a no-op.
+func ensureIndexes() {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	// 1. Unique index on users.email
+	// Enforces one account per email at the database level — prevents race conditions
+	// where two simultaneous registrations with the same email both pass the app-level check.
+	_, err := db.GetCollection("users").Indexes().CreateOne(ctx, mongo.IndexModel{
+		Keys:    bson.D{{Key: "email", Value: 1}},
+		Options: options.Index().SetUnique(true),
+	})
+	if err != nil {
+		log.Printf("Warning: could not create users.email index: %v", err)
+	} else {
+		log.Println("Index ensured: users.email (unique)")
+	}
+
+	// 2. Index on polls.creator_id
+	// Speeds up GET /api/polls/my which filters all polls by the logged-in user's ID.
+	_, err = db.GetCollection("polls").Indexes().CreateOne(ctx, mongo.IndexModel{
+		Keys: bson.D{{Key: "creator_id", Value: 1}},
+	})
+	if err != nil {
+		log.Printf("Warning: could not create polls.creator_id index: %v", err)
+	} else {
+		log.Println("Index ensured: polls.creator_id")
+	}
+
+	// 3. Index on vote_logs.poll_id
+	// Speeds up audit queries that look up all votes for a specific poll.
+	_, err = db.GetCollection("vote_logs").Indexes().CreateOne(ctx, mongo.IndexModel{
+		Keys: bson.D{{Key: "poll_id", Value: 1}},
+	})
+	if err != nil {
+		log.Printf("Warning: could not create vote_logs.poll_id index: %v", err)
+	} else {
+		log.Println("Index ensured: vote_logs.poll_id")
+	}
 }
