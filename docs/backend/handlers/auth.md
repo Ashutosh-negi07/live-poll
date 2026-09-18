@@ -1,69 +1,139 @@
-# Auth Handlers Documentation (`backend/handlers/auth.go`)
+# Auth Handlers (`backend/handlers/auth.go`)
 
-## 1. What does `handlers/auth.go` do?
-`auth.go` contains the controller functions for user authentication:
-- **`Register` (`POST /api/auth/register`)**: Validates registration data, checks for duplicate email addresses, hashes the plaintext password with bcrypt, inserts a new user record into MongoDB, and issues a JWT token.
-- **`Login` (`POST /api/auth/login`)**: Finds the user in MongoDB, compares the submitted password against the stored bcrypt hash, and issues a fresh JWT token upon successful authentication.
-- **`GetMe` (`GET /api/auth/me`)**: Returns the authenticated user profile using the user ID saved in the request context by the JWT middleware.
+## What it does
+Implements the three authentication endpoints:
+- `POST /api/auth/register` — create a new account, returns JWT
+- `POST /api/auth/login` — verify credentials, returns JWT
+- `GET /api/auth/me` — return the logged-in user's profile (protected)
 
----
+## Handler Pattern in Gin
 
-## 2. Why is it used?
-The project specification requires that poll creation is restricted to authenticated users. Auth handlers provide the secure onboarding and session management entry points for poll creators.
-
----
-
-## 3. Go Concepts & Security Explained for Beginners
-
-### A. Bcrypt Password Hashing (`bcrypt.GenerateFromPassword`)
-- Passwords must **never** be stored in plain text or with fast algorithms like MD5 or SHA-256.
-- Bcrypt is an adaptive hashing function designed to be deliberately slow.
-- It automatically generates a cryptographically random **salt** and blends it into the hash.
-- `bcrypt.CompareHashAndPassword(hashedBytes, passwordBytes)` compares the input safely in constant time, preventing timing-attack vulnerabilities.
-
-### B. MongoDB Document Insertion with Go Driver v2
-- In Go MongoDB driver v2:
-  ```go
-  collection := db.GetCollection("users")
-  result, err := collection.InsertOne(ctx, newUser)
-  ```
-- Go structs tagged with `bson:"..."` are serialized directly into binary BSON format for storage.
-
-### C. JWT Token Generation
-- Tokens are built using `jwt.NewWithClaims(jwt.SigningMethodHS256, claims)`.
-- Signed into a string with `token.SignedString([]byte(cfg.JWTSecret))`.
-
----
-
-## 4. Handler Breakdown & Internal Mechanics
+Each handler that needs `cfg` (for `JWTSecret`, `JWTExpiryHours`) is a **factory function** — it takes `cfg` and returns a `gin.HandlerFunc`:
 
 ```go
-func Register(cfg *config.Config) gin.HandlerFunc
+func Register(cfg *config.Config) gin.HandlerFunc {
+    return func(c *gin.Context) {
+        // handler logic here — cfg is captured in the closure
+    }
+}
 ```
-1. **Binding & Validation:**
-   ```go
-   var input models.RegisterInput
-   if err := c.ShouldBindJSON(&input); err != nil {
-       c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
-       return
-   }
-   ```
-2. **Duplicate Check:** Queries MongoDB `users` collection to check if `input.Email` already exists. If found, returns `409 Conflict`.
-3. **Password Hashing:**
-   ```go
-   hash, err := bcrypt.GenerateFromPassword([]byte(input.Password), bcrypt.DefaultCost)
-   ```
-4. **Insert into MongoDB:** Saves the user document with `CreatedAt` and `UpdatedAt` timestamps.
-5. **Issue Token:** Generates a 24-hour signed JWT and responds with `201 Created`.
 
+`GetMe` doesn't need `cfg` (it only reads from MongoDB and context), so it is a plain `gin.HandlerFunc` directly.
+
+---
+
+## `Register` — Step by Step
+
+### 1. `ShouldBindJSON`
 ```go
-func Login(cfg *config.Config) gin.HandlerFunc
+var input models.RegisterInput
+if err := c.ShouldBindJSON(&input); err != nil {
+    c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+    return
+}
 ```
-1. Binds JSON payload (`email`, `password`).
-2. Queries MongoDB by email:
-   ```go
-   err := collection.FindOne(ctx, bson.M{"email": strings.ToLower(input.Email)}).Decode(&user)
-   ```
-   If not found, returns `401 Unauthorized` (generic message to avoid email enumeration).
-3. Compares password hash with `bcrypt.CompareHashAndPassword`.
-4. Issues a signed JWT and responds with `200 OK`.
+Gin reads the request body, decodes JSON into `input`, and runs all `binding:` tag validations. If anything fails (missing field, email format wrong, password too short), `err` is non-nil and we immediately return `400 Bad Request`. No further logic runs.
+
+### 2. Email Normalization
+```go
+input.Email = strings.ToLower(strings.TrimSpace(input.Email))
+```
+`"  User@Gmail.COM  "` → `"user@gmail.com"`. Prevents duplicate accounts differing only in case or whitespace.
+
+### 3. Duplicate Check
+```go
+err := collection.FindOne(ctx, bson.M{"email": input.Email}).Decode(&existing)
+if err == nil {
+    c.JSON(http.StatusConflict, gin.H{"error": "email already registered"})
+    return
+}
+```
+`FindOne` returns an error when no document is found (`mongo.ErrNoDocuments`). So `err == nil` means a document *was* found — the email exists. We return `409 Conflict`.
+
+### 4. bcrypt Hashing
+```go
+hash, err := bcrypt.GenerateFromPassword([]byte(input.Password), bcrypt.DefaultCost)
+```
+`bcrypt.DefaultCost` = 10. The function generates a random salt internally, hashes the password 2¹⁰ times, and returns a 60-character string that embeds the salt, cost, and hash. This takes ~100ms deliberately.
+
+### 5. MongoDB Insert
+```go
+newUser := models.User{
+    ID:           bson.NewObjectID(),
+    ...
+    PasswordHash: string(hash),
+}
+collection.InsertOne(ctx, newUser)
+```
+`bson.NewObjectID()` generates a unique 12-byte ID. The Go struct is automatically serialized to BSON using the `bson:"..."` tags.
+
+### 6. `generateToken` (private helper)
+```go
+func generateToken(cfg *config.Config, user models.User) (string, error) {
+    claims := &middleware.Claims{
+        UserID: user.ID.Hex(),  // ObjectID → "65f1a2b3..."
+        Name:   user.Name,
+        RegisteredClaims: jwt.RegisteredClaims{
+            ExpiresAt: jwt.NewNumericDate(time.Now().Add(...)),
+            IssuedAt:  jwt.NewNumericDate(time.Now()),
+        },
+    }
+    token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
+    return token.SignedString([]byte(cfg.JWTSecret))
+}
+```
+- `user.ID.Hex()` converts the 12-byte `bson.ObjectID` to a 24-character hex string — safe to embed in JWT and URLs
+- `jwt.SigningMethodHS256` = HMAC-SHA256
+- `token.SignedString(secret)` produces the final `eyJ...` string
+
+---
+
+## `Login` — Security Notes
+
+### Email Enumeration Prevention
+Both "user not found" and "wrong password" return the identical message:
+```go
+c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid email or password"})
+```
+If we said "email not found" vs "wrong password", an attacker could enumerate valid email addresses by observing which message they get.
+
+### `bcrypt.CompareHashAndPassword`
+```go
+bcrypt.CompareHashAndPassword([]byte(user.PasswordHash), []byte(input.Password))
+```
+This is a **constant-time comparison** — it takes the same amount of time whether the password is completely wrong or off by one character. This prevents timing attacks where an attacker measures response time to deduce how close their guess was.
+
+---
+
+## `GetMe` — Reading from Context
+```go
+userID := c.MustGet("userID").(string)
+```
+`AuthMiddleware` must have run before this handler (enforced at route registration in `main.go`). `MustGet` panics if the key isn't set, but since the middleware guarantees it, this is safe. The `.(string)` is a Go type assertion — converts the `interface{}` stored in the context to a concrete `string`.
+
+---
+
+## Response Shape
+
+**Register/Login success (`201`/`200`):**
+```json
+{
+  "token": "eyJhbGciOiJIUzI1NiJ9...",
+  "user": {
+    "id": "65f1a2b3c4d5e6f7a8b9c0d1",
+    "name": "Ashutosh",
+    "email": "ashutosh@example.com"
+  }
+}
+```
+
+**GetMe success (`200`):**
+```json
+{
+  "id": "65f1a2b3c4d5e6f7a8b9c0d1",
+  "name": "Ashutosh",
+  "email": "ashutosh@example.com",
+  "created_at": "2026-09-18T18:00:00Z"
+}
+```
+Note: `password_hash` is absent — the `json:"-"` tag on the `User` struct silently omits it from every JSON response automatically.
