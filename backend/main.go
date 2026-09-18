@@ -60,7 +60,9 @@ func main() {
 	// ── 8. Public routes (no JWT required) ──────────────────────────────────
 	router.POST("/api/auth/register", handlers.Register(cfg))
 	router.POST("/api/auth/login", handlers.Login(cfg))
-	router.GET("/api/polls/:id", handlers.GetPoll) // audience view — public
+	router.GET("/api/polls/:id", handlers.GetPoll)              // audience view — public
+	router.POST("/api/polls/:id/vote", handlers.Vote)           // cast a vote — public
+	router.GET("/api/polls/:id/stream", handlers.Stream)        // SSE live stream — public
 
 	// ── 9. Protected routes (JWT required) ───────────────────────────────────
 	protected := router.Group("/api")
