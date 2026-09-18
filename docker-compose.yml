@@ -1,0 +1,26 @@
+version: "3.8"
+
+services:
+  # MongoDB - our main database
+  mongodb:
+    image: mongo:7
+    container_name: poll_mongo
+    ports:
+      - "27017:27017"        # our Go app connects on this port
+    volumes:
+      - mongo_data:/data/db  # data survives container restarts
+    environment:
+      MONGO_INITDB_DATABASE: livepoll
+
+  # Redis - our real-time pub/sub + vote counter
+  redis:
+    image: redis:7-alpine
+    container_name: poll_redis
+    ports:
+      - "6379:6379"          # our Go app connects on this port
+    volumes:
+      - redis_data:/data
+
+volumes:
+  mongo_data:
+  redis_data:
