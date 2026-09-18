@@ -11,6 +11,8 @@ import (
 
 	"github.com/Ashutosh-negi07/live-poll/config"
 	"github.com/Ashutosh-negi07/live-poll/db"
+	"github.com/Ashutosh-negi07/live-poll/handlers"
+	"github.com/Ashutosh-negi07/live-poll/middleware"
 	"github.com/gin-contrib/cors"
 	"github.com/gin-gonic/gin"
 )
@@ -48,7 +50,6 @@ func main() {
 	}))
 
 	// ── 7. Health check endpoint ─────────────────────────────────────────────
-	// A quick way to verify the server + both databases are alive.
 	router.GET("/api/health", func(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{
 			"status":  "ok",
@@ -56,7 +57,22 @@ func main() {
 		})
 	})
 
-	// ── 8. Configure the HTTP server ─────────────────────────────────────────
+	// ── 8. Public routes (no JWT required) ──────────────────────────────────
+	router.POST("/api/auth/register", handlers.Register(cfg))
+	router.POST("/api/auth/login", handlers.Login(cfg))
+	router.GET("/api/polls/:id", handlers.GetPoll) // audience view — public
+
+	// ── 9. Protected routes (JWT required) ───────────────────────────────────
+	protected := router.Group("/api")
+	protected.Use(middleware.AuthMiddleware(cfg))
+	{
+		protected.GET("/auth/me", handlers.GetMe)
+		protected.POST("/polls", handlers.CreatePoll(cfg))
+		protected.GET("/polls/my", handlers.ListMyPolls)
+		protected.PATCH("/polls/:id/close", handlers.ClosePoll)
+	}
+
+	// ── 10. Configure the HTTP server ────────────────────────────────────────
 	server := &http.Server{
 		Addr:         ":" + cfg.Port,
 		Handler:      router,
