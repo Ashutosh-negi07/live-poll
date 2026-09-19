@@ -15,6 +15,7 @@ type Config struct {
 	ClientOrigin   string
 	MongoURI       string
 	MongoDBName    string
+	RedisURL       string
 	RedisAddr      string
 	RedisPassword  string
 	RedisDB        int
@@ -35,6 +36,7 @@ func LoadConfig() *Config {
 		ClientOrigin:   getEnv("CLIENT_ORIGIN", "http://localhost:5173"),
 		MongoURI:       getEnv("MONGO_URI", "mongodb://localhost:27017"),
 		MongoDBName:    getEnv("MONGO_DB_NAME", "livepoll"),
+		RedisURL:       getEnv("REDIS_URL", ""),
 		RedisAddr:      getEnv("REDIS_ADDR", "localhost:6379"),
 		RedisPassword:  getEnv("REDIS_PASSWORD", ""),
 		RedisDB:        getEnvAsInt("REDIS_DB", 0),

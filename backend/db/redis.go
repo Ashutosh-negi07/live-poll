@@ -2,6 +2,7 @@ package db
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"time"
 
@@ -17,13 +18,24 @@ func ConnectRedis(cfg *config.Config) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	log.Printf("Connecting to Redis at %s (db: %d) ...", cfg.RedisAddr, cfg.RedisDB)
+	var opts *redis.Options
+	if cfg.RedisURL != "" {
+		var err error
+		opts, err = redis.ParseURL(cfg.RedisURL)
+		if err != nil {
+			return fmt.Errorf("invalid REDIS_URL: %w", err)
+		}
+		log.Printf("Connecting to Redis via REDIS_URL at %s ...", opts.Addr)
+	} else {
+		log.Printf("Connecting to Redis at %s (db: %d) ...", cfg.RedisAddr, cfg.RedisDB)
+		opts = &redis.Options{
+			Addr:     cfg.RedisAddr,
+			Password: cfg.RedisPassword,
+			DB:       cfg.RedisDB,
+		}
+	}
 
-	client := redis.NewClient(&redis.Options{
-		Addr:     cfg.RedisAddr,
-		Password: cfg.RedisPassword,
-		DB:       cfg.RedisDB,
-	})
+	client := redis.NewClient(opts)
 
 	// PING → PONG: confirms the Redis server is reachable and authenticated.
 	if _, err := client.Ping(ctx).Result(); err != nil {
