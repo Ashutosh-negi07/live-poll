@@ -2,9 +2,9 @@ package handlers
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
-	"strconv"
 	"time"
 
 	"github.com/Ashutosh-negi07/live-poll/db"
@@ -27,8 +27,8 @@ func Stream(c *gin.Context) {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 
-	count, err := db.GetCollection("polls").CountDocuments(ctx, bson.M{"_id": objID})
-	if err != nil || count == 0 {
+	var pollCheck bson.M
+	if err := db.GetCollection("polls").FindOne(ctx, bson.M{"_id": objID}).Decode(&pollCheck); err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "poll not found"})
 		return
 	}
@@ -46,14 +46,15 @@ func Stream(c *gin.Context) {
 		return
 	}
 
-	// 4. Send the current vote snapshot immediately so the client doesn't wait
+	// 4. Send current vote snapshot immediately so the client doesn't wait
 	snapCtx, snapCancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer snapCancel()
 
 	rawVotes, _ := db.RedisClient.HGetAll(snapCtx, "poll:"+pollID+":votes").Result()
-	snapshot := buildSSEData(rawVotes)
-	fmt.Fprintf(c.Writer, "event: snapshot\ndata: %s\n\n", snapshot)
-	flusher.Flush()
+	if snapshot, err := json.Marshal(rawVotes); err == nil {
+		fmt.Fprintf(c.Writer, "event: snapshot\ndata: %s\n\n", snapshot)
+		flusher.Flush()
+	}
 
 	// 5. Subscribe to the Redis Pub/Sub channel for this poll
 	streamCtx, streamCancel := context.WithCancel(context.Background())
@@ -63,48 +64,19 @@ func Stream(c *gin.Context) {
 	defer pubsub.Close()
 
 	msgChan := pubsub.Channel()
-
-	// 6. Watch for client disconnect using Gin's request context
 	clientGone := c.Request.Context().Done()
 
-	// 7. Event loop — runs until client disconnects or server shuts down
+	// 6. Event loop — runs until client disconnects or server shuts down
 	for {
 		select {
 		case <-clientGone:
-			// Browser tab closed or network dropped — stop the goroutine
 			return
-
 		case msg, ok := <-msgChan:
 			if !ok {
-				// Redis channel was closed (server shutdown)
 				return
 			}
-			// Write SSE event: the msg.Payload is already JSON from the vote handler
 			fmt.Fprintf(c.Writer, "event: vote\ndata: %s\n\n", msg.Payload)
 			flusher.Flush()
 		}
 	}
-}
-
-// buildSSEData converts a raw Redis HGetAll result (map[string]string)
-// into a JSON string suitable for an SSE data field.
-func buildSSEData(rawVotes map[string]string) string {
-	converted := make(map[string]int64, len(rawVotes))
-	for k, v := range rawVotes {
-		n, _ := strconv.ParseInt(v, 10, 64)
-		converted[k] = n
-	}
-
-	// Manual JSON build to avoid importing encoding/json for a simple map
-	result := "{"
-	first := true
-	for k, v := range converted {
-		if !first {
-			result += ","
-		}
-		result += fmt.Sprintf("%q:%d", k, v)
-		first = false
-	}
-	result += "}"
-	return result
 }

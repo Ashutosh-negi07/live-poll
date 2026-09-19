@@ -69,27 +69,29 @@ func main() {
 	// ── 9. Public routes (no JWT required) ───────────────────────────────────
 	router.POST("/api/auth/register", handlers.Register(cfg))
 	router.POST("/api/auth/login", handlers.Login(cfg))
-	router.GET("/api/polls/:id", handlers.GetPoll)       // audience view — public
-	router.POST("/api/polls/:id/vote", handlers.Vote)    // cast a vote — public
-	router.GET("/api/polls/:id/stream", handlers.Stream) // SSE live stream — public
+	router.GET("/api/polls/:id", handlers.GetPoll)
+	router.POST("/api/polls/:id/vote", handlers.Vote(cfg))   // uses JWT if present
+	router.GET("/api/polls/:id/stream", handlers.Stream)
 
 	// ── 10. Protected routes (JWT required) ──────────────────────────────────
 	protected := router.Group("/api")
 	protected.Use(middleware.AuthMiddleware(cfg))
 	{
 		protected.GET("/auth/me", handlers.GetMe)
-		protected.POST("/polls", handlers.CreatePoll(cfg))
+		protected.POST("/polls", handlers.CreatePoll)
 		protected.GET("/polls/my", handlers.ListMyPolls)
 		protected.PATCH("/polls/:id/close", handlers.ClosePoll)
+		protected.DELETE("/polls/:id", handlers.DeletePoll)
 	}
 
 	// ── 11. Configure the HTTP server ────────────────────────────────────────
 	server := &http.Server{
-		Addr:         ":" + cfg.Port,
-		Handler:      router,
-		ReadTimeout:  15 * time.Second,
-		WriteTimeout: 15 * time.Second,
-		IdleTimeout:  60 * time.Second,
+		Addr:        ":" + cfg.Port,
+		Handler:     router,
+		ReadTimeout: 15 * time.Second,
+		// WriteTimeout is intentionally omitted — SSE connections must stay
+		// open indefinitely and a global write deadline would kill them.
+		IdleTimeout: 60 * time.Second,
 	}
 
 	// ── 12. Start server in a background goroutine ────────────────────────────
@@ -150,14 +152,4 @@ func ensureIndexes() {
 		log.Println("Index ensured: polls.creator_id")
 	}
 
-	// 3. Index on vote_logs.poll_id
-	// Speeds up audit queries that look up all votes for a specific poll.
-	_, err = db.GetCollection("vote_logs").Indexes().CreateOne(ctx, mongo.IndexModel{
-		Keys: bson.D{{Key: "poll_id", Value: 1}},
-	})
-	if err != nil {
-		log.Printf("Warning: could not create vote_logs.poll_id index: %v", err)
-	} else {
-		log.Println("Index ensured: vote_logs.poll_id")
-	}
 }
