@@ -22,14 +22,12 @@ func Register(cfg *config.Config) gin.HandlerFunc {
 		// 1. Bind and validate request body
 		var input models.RegisterInput
 		if err := c.ShouldBindJSON(&input); err != nil {
-			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			c.JSON(http.StatusBadRequest, gin.H{"error": friendlyError(err)})
 			return
 		}
-
-		// 2. Normalize email to lowercase
 		input.Email = strings.ToLower(strings.TrimSpace(input.Email))
 
-		// 3. Check if email already exists
+		// 2. Check if email already exists
 		collection := db.GetCollection("users")
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
@@ -37,19 +35,18 @@ func Register(cfg *config.Config) gin.HandlerFunc {
 		var existing models.User
 		err := collection.FindOne(ctx, bson.M{"email": input.Email}).Decode(&existing)
 		if err == nil {
-			// FindOne succeeded → a user with this email already exists
 			c.JSON(http.StatusConflict, gin.H{"error": "email already registered"})
 			return
 		}
 
-		// 4. Hash the password
+		// 3. Hash the password
 		hash, err := bcrypt.GenerateFromPassword([]byte(input.Password), bcrypt.DefaultCost)
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "could not process password"})
 			return
 		}
 
-		// 5. Build and insert the user document
+		// 4. Build and insert the user document
 		newUser := models.User{
 			ID:           bson.NewObjectID(),
 			Name:         strings.TrimSpace(input.Name),
@@ -63,14 +60,13 @@ func Register(cfg *config.Config) gin.HandlerFunc {
 			return
 		}
 
-		// 6. Issue JWT
+		// 5. Issue JWT and respond
 		tokenString, err := generateToken(cfg, newUser)
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "could not generate token"})
 			return
 		}
 
-		// 7. Respond
 		resp := models.AuthResponse{Token: tokenString}
 		resp.User.ID = newUser.ID.Hex()
 		resp.User.Name = newUser.Name
@@ -86,7 +82,7 @@ func Login(cfg *config.Config) gin.HandlerFunc {
 		// 1. Bind and validate request body
 		var input models.LoginInput
 		if err := c.ShouldBindJSON(&input); err != nil {
-			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			c.JSON(http.StatusBadRequest, gin.H{"error": friendlyError(err)})
 			return
 		}
 

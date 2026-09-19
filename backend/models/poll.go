@@ -39,15 +39,5 @@ type VoteInput struct {
 // PollResult is a poll with live vote counts merged in from Redis.
 type PollResult struct {
 	Poll
-	Votes      map[string]int64 `json:"votes"`       // optionID → count from Redis
-	TotalVotes int64            `json:"total_votes"`
-}
-
-// VoteLog is stored in MongoDB's "vote_logs" collection for audit trail.
-type VoteLog struct {
-	ID        bson.ObjectID `bson:"_id,omitempty" json:"id"`
-	PollID    bson.ObjectID `bson:"poll_id"       json:"poll_id"`
-	OptionID  string        `bson:"option_id"     json:"option_id"`
-	VoterHash string        `bson:"voter_hash"    json:"voter_hash"`
-	CreatedAt time.Time     `bson:"created_at"    json:"created_at"`
+	Votes map[string]int64 `json:"votes"` // optionID → count
 }
